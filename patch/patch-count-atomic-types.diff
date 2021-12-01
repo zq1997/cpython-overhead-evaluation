@@ -1,0 +1,368 @@
+diff --git a/Programs/python.c b/Programs/python.c
+index 84148f7767..2bc910fe01 100644
+--- a/Programs/python.c
++++ b/Programs/python.c
+@@ -9,9 +9,61 @@ wmain(int argc, wchar_t **argv)
+     return Py_Main(argc, argv);
+ }
+ #else
++
++#include <sys/mman.h>
++#include <sys/file.h>
++
++extern long count_atomic[3][2];
++
++static void
++finish() {
++    const char *output_file = getenv("OUTPUT_FILE");
++    if (output_file && strlen(output_file)) {
++        error_t backup_errno = errno;
++        errno = 0;
++
++        int fd = open(output_file, O_RDWR | O_CREAT, 0660);
++        flock(fd, LOCK_EX);
++
++        const size_t total_size = sizeof(count_atomic);
++        int empty_file = (size_t) lseek(fd, 0, SEEK_END) != total_size;
++        if (empty_file) {
++            ftruncate(fd, total_size);
++        } else {
++            lseek(fd, 0, SEEK_SET);
++        }
++
++        long *addr = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++        if (empty_file) {
++            memset(addr, 0, total_size);
++        }
++
++        for (size_t i = 0; i < total_size / sizeof(long); ++i) {
++            addr[i] += count_atomic[0][i];
++        }
++
++        munlock(addr, total_size);
++        close(fd);
++
++        if (errno) {
++            perror(output_file);
++        }
++        errno = backup_errno;
++    }
++}
++
++pid_t fork() {
++    pid_t __libc_fork();
++    pid_t pid = __libc_fork();
++    if (!pid) {
++        memset(count_atomic, 0, sizeof(count_atomic));
++    }
++    return pid;
++}
++
+ int
+-main(int argc, char **argv)
+-{
++main(int argc, char **argv) {
++    atexit(finish);
+     return Py_BytesMain(argc, argv);
+ }
+ #endif
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 3392cd0365..d09911776b 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -886,6 +886,31 @@ eval_frame_handle_pending(PyThreadState *tstate)
+     return 0;
+ }
+ 
++
++long count_atomic[3][2];
++#define count_math_operator (count_atomic[0])
++#define count_load_attr (count_atomic[1])
++#define count_load_method (count_atomic[2])
++
++
++static inline int is_atomic_type(PyObject *obj) {
++    PyTypeObject *type = obj->ob_type;
++    return type == &PyLong_Type ||
++            type == &PyFloat_Type ||
++            type == &PyBool_Type ||
++            type == &PyComplex_Type ||
++            type == &PyUnicode_Type ||
++            type == &PyBytes_Type ||
++            type == &PyTuple_Type ||
++            type == &PyList_Type ||
++            type == &PySet_Type ||
++            type == &PyMap_Type ||
++            type == &_PyNone_Type ||
++            type == &PySlice_Type ||
++            type == &PyEllipsis_Type;
++}
++
++
+ PyObject* _Py_HOT_FUNCTION
+ _PyEval_EvalFrameDefault(PyThreadState *tstate, PyFrameObject *f, int throwflag)
+ {
+@@ -1527,6 +1552,7 @@ main_loop:
+ 
+         case TARGET(UNARY_POSITIVE): {
+             PyObject *value = TOP();
++            count_math_operator[is_atomic_type(value)]++;
+             PyObject *res = PyNumber_Positive(value);
+             Py_DECREF(value);
+             SET_TOP(res);
+@@ -1537,6 +1563,7 @@ main_loop:
+ 
+         case TARGET(UNARY_NEGATIVE): {
+             PyObject *value = TOP();
++            count_math_operator[is_atomic_type(value)]++;
+             PyObject *res = PyNumber_Negative(value);
+             Py_DECREF(value);
+             SET_TOP(res);
+@@ -1547,6 +1574,7 @@ main_loop:
+ 
+         case TARGET(UNARY_NOT): {
+             PyObject *value = TOP();
++            count_math_operator[is_atomic_type(value)]++;
+             int err = PyObject_IsTrue(value);
+             Py_DECREF(value);
+             if (err == 0) {
+@@ -1565,6 +1593,7 @@ main_loop:
+ 
+         case TARGET(UNARY_INVERT): {
+             PyObject *value = TOP();
++            count_math_operator[is_atomic_type(value)]++;
+             PyObject *res = PyNumber_Invert(value);
+             Py_DECREF(value);
+             SET_TOP(res);
+@@ -1576,6 +1605,7 @@ main_loop:
+         case TARGET(BINARY_POWER): {
+             PyObject *exp = POP();
+             PyObject *base = TOP();
++            count_math_operator[is_atomic_type(exp) && is_atomic_type(base)]++;
+             PyObject *res = PyNumber_Power(base, exp, Py_None);
+             Py_DECREF(base);
+             Py_DECREF(exp);
+@@ -1588,6 +1618,7 @@ main_loop:
+         case TARGET(BINARY_MULTIPLY): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_Multiply(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1600,6 +1631,7 @@ main_loop:
+         case TARGET(BINARY_MATRIX_MULTIPLY): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_MatrixMultiply(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1612,6 +1644,7 @@ main_loop:
+         case TARGET(BINARY_TRUE_DIVIDE): {
+             PyObject *divisor = POP();
+             PyObject *dividend = TOP();
++            count_math_operator[is_atomic_type(divisor) && is_atomic_type(dividend)]++;
+             PyObject *quotient = PyNumber_TrueDivide(dividend, divisor);
+             Py_DECREF(dividend);
+             Py_DECREF(divisor);
+@@ -1624,6 +1657,7 @@ main_loop:
+         case TARGET(BINARY_FLOOR_DIVIDE): {
+             PyObject *divisor = POP();
+             PyObject *dividend = TOP();
++            count_math_operator[is_atomic_type(divisor) && is_atomic_type(dividend)]++;
+             PyObject *quotient = PyNumber_FloorDivide(dividend, divisor);
+             Py_DECREF(dividend);
+             Py_DECREF(divisor);
+@@ -1636,6 +1670,7 @@ main_loop:
+         case TARGET(BINARY_MODULO): {
+             PyObject *divisor = POP();
+             PyObject *dividend = TOP();
++            count_math_operator[is_atomic_type(divisor) && is_atomic_type(dividend)]++;
+             PyObject *res;
+             if (PyUnicode_CheckExact(dividend) && (
+                   !PyUnicode_Check(divisor) || PyUnicode_CheckExact(divisor))) {
+@@ -1656,6 +1691,7 @@ main_loop:
+         case TARGET(BINARY_ADD): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *sum;
+             /* NOTE(haypo): Please don't try to micro-optimize int+int on
+                CPython using bytecode, it is simply worthless.
+@@ -1682,6 +1718,7 @@ main_loop:
+         case TARGET(BINARY_SUBTRACT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *diff = PyNumber_Subtract(left, right);
+             Py_DECREF(right);
+             Py_DECREF(left);
+@@ -1706,6 +1743,7 @@ main_loop:
+         case TARGET(BINARY_LSHIFT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_Lshift(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1718,6 +1756,7 @@ main_loop:
+         case TARGET(BINARY_RSHIFT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_Rshift(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1730,6 +1769,7 @@ main_loop:
+         case TARGET(BINARY_AND): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_And(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1742,6 +1782,7 @@ main_loop:
+         case TARGET(BINARY_XOR): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_Xor(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1754,6 +1795,7 @@ main_loop:
+         case TARGET(BINARY_OR): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_Or(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1790,6 +1832,7 @@ main_loop:
+         case TARGET(INPLACE_POWER): {
+             PyObject *exp = POP();
+             PyObject *base = TOP();
++            count_math_operator[is_atomic_type(exp) && is_atomic_type(base)]++;
+             PyObject *res = PyNumber_InPlacePower(base, exp, Py_None);
+             Py_DECREF(base);
+             Py_DECREF(exp);
+@@ -1802,6 +1845,7 @@ main_loop:
+         case TARGET(INPLACE_MULTIPLY): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceMultiply(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1814,6 +1858,7 @@ main_loop:
+         case TARGET(INPLACE_MATRIX_MULTIPLY): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceMatrixMultiply(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1826,6 +1871,7 @@ main_loop:
+         case TARGET(INPLACE_TRUE_DIVIDE): {
+             PyObject *divisor = POP();
+             PyObject *dividend = TOP();
++            count_math_operator[is_atomic_type(divisor) && is_atomic_type(dividend)]++;
+             PyObject *quotient = PyNumber_InPlaceTrueDivide(dividend, divisor);
+             Py_DECREF(dividend);
+             Py_DECREF(divisor);
+@@ -1838,6 +1884,7 @@ main_loop:
+         case TARGET(INPLACE_FLOOR_DIVIDE): {
+             PyObject *divisor = POP();
+             PyObject *dividend = TOP();
++            count_math_operator[is_atomic_type(divisor) && is_atomic_type(dividend)]++;
+             PyObject *quotient = PyNumber_InPlaceFloorDivide(dividend, divisor);
+             Py_DECREF(dividend);
+             Py_DECREF(divisor);
+@@ -1850,6 +1897,7 @@ main_loop:
+         case TARGET(INPLACE_MODULO): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *mod = PyNumber_InPlaceRemainder(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1862,6 +1910,7 @@ main_loop:
+         case TARGET(INPLACE_ADD): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *sum;
+             if (PyUnicode_CheckExact(left) && PyUnicode_CheckExact(right)) {
+                 sum = unicode_concatenate(tstate, left, right, f, next_instr);
+@@ -1881,6 +1930,7 @@ main_loop:
+         case TARGET(INPLACE_SUBTRACT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *diff = PyNumber_InPlaceSubtract(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1893,6 +1943,7 @@ main_loop:
+         case TARGET(INPLACE_LSHIFT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceLshift(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1905,6 +1956,7 @@ main_loop:
+         case TARGET(INPLACE_RSHIFT): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceRshift(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1917,6 +1969,7 @@ main_loop:
+         case TARGET(INPLACE_AND): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceAnd(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1929,6 +1982,7 @@ main_loop:
+         case TARGET(INPLACE_XOR): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceXor(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -1941,6 +1995,7 @@ main_loop:
+         case TARGET(INPLACE_OR): {
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyNumber_InPlaceOr(left, right);
+             Py_DECREF(left);
+             Py_DECREF(right);
+@@ -2964,6 +3019,7 @@ main_loop:
+             PyObject *name = GETITEM(names, oparg);
+             PyObject *owner = TOP();
+             PyObject *res = PyObject_GetAttr(owner, name);
++            count_load_attr[is_atomic_type(owner)]++;
+             Py_DECREF(owner);
+             SET_TOP(res);
+             if (res == NULL)
+@@ -2975,6 +3031,7 @@ main_loop:
+             assert(oparg <= Py_GE);
+             PyObject *right = POP();
+             PyObject *left = TOP();
++            count_math_operator[is_atomic_type(left) && is_atomic_type(right)]++;
+             PyObject *res = PyObject_RichCompare(left, right, oparg);
+             SET_TOP(res);
+             Py_DECREF(left);
+@@ -3402,6 +3459,7 @@ main_loop:
+             PyObject *name = GETITEM(names, oparg);
+             PyObject *obj = TOP();
+             PyObject *meth = NULL;
++            count_load_method[is_atomic_type(obj)]++;
+ 
+             int meth_found = _PyObject_GetMethod(obj, name, &meth);
+ 

@@ -1,0 +1,100 @@
+diff --git a/Programs/python.c b/Programs/python.c
+index 84148f7767..c9a845ff16 100644
+--- a/Programs/python.c
++++ b/Programs/python.c
+@@ -9,9 +9,61 @@ wmain(int argc, wchar_t **argv)
+     return Py_Main(argc, argv);
+ }
+ #else
++
++#include <sys/mman.h>
++#include <sys/file.h>
++
++extern long dxp[257];
++
++static void
++finish() {
++    const char *output_file = getenv("OUTPUT_FILE");
++    if (output_file && strlen(output_file)) {
++        error_t backup_errno = errno;
++        errno = 0;
++
++        int fd = open(output_file, O_RDWR | O_CREAT, 0660);
++        flock(fd, LOCK_EX);
++
++        const size_t total_size = sizeof(dxp);
++        int empty_file = (size_t) lseek(fd, 0, SEEK_END) != total_size;
++        if (empty_file) {
++            ftruncate(fd, total_size);
++        } else {
++            lseek(fd, 0, SEEK_SET);
++        }
++
++        long *addr = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++        if (empty_file) {
++            memset(addr, 0, total_size);
++        }
++
++        for (size_t i = 0; i < total_size / sizeof(long); ++i) {
++            addr[i] += dxp[i];
++        }
++
++        munlock(addr, total_size);
++        close(fd);
++
++        if (errno) {
++            perror(output_file);
++        }
++        errno = backup_errno;
++    }
++}
++
++pid_t fork() {
++    pid_t __libc_fork();
++    pid_t pid = __libc_fork();
++    if (!pid) {
++        memset(dxp, 0, sizeof(dxp));
++    }
++    return pid;
++}
++
+ int
+-main(int argc, char **argv)
+-{
++main(int argc, char **argv) {
++    atexit(finish);
+     return Py_BytesMain(argc, argv);
+ }
+ #endif
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 3392cd0365..5cdc771ad5 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -92,15 +92,11 @@ static void format_awaitable_error(PyThreadState *, PyTypeObject *, int, int);
+     "free variable '%.200s' referenced before assignment" \
+     " in enclosing scope"
+ 
+-/* Dynamic execution profile */
+-#ifdef DYNAMIC_EXECUTION_PROFILE
+-#ifdef DXPAIRS
+-static long dxpairs[257][256];
+-#define dxp dxpairs[256]
+-#else
+-static long dxp[256];
+-#endif
++#ifndef DYNAMIC_EXECUTION_PROFILE
++#define DYNAMIC_EXECUTION_PROFILE
+ #endif
++#undef DXPAIRS
++long dxp[257];
+ 
+ /* per opcode cache */
+ #ifdef Py_DEBUG
+@@ -2532,6 +2528,7 @@ main_loop:
+                         assert(ptr != NULL);
+                         Py_INCREF(ptr);
+                         PUSH(ptr);
++                        dxp[256]++;
+                         DISPATCH();
+                     }
+                 }
