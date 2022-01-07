@@ -13,7 +13,6 @@ record_collect_helper.collect(config.D_RECORD_BMISS_NT, 'branch-misses:P', confi
 
 count_helper.collect(config.D_COUNT_OPCODES)
 count_helper.collect(config.D_COUNT_ATOMIC_TYPES)
-count_helper.collect(config.D_COUNT_PREDEFINED)
 
 stat_helper.collect(config.D_STAT_MANY, 'instructions,cycles,branch-misses')
 stat_helper.collect(config.D_STAT_MANY_NON_THREADED, 'instructions,cycles,branch-misses',
