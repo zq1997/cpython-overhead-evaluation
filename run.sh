@@ -41,5 +41,4 @@ cd "$THIS_DIR"
 python3 prepare_bm.py
 python3 collect_data.py
 python3 estimate_confidence.py
-python3 analyze_dwarf.py
 find . -name study_\*.py -print0 | xargs -0L1 python3
